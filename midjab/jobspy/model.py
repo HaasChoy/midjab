@@ -284,7 +284,7 @@ class JobResponse(BaseModel):
 
 
 class Site(Enum):
-    LINKEDIN = "linkedin"
+    LINKEDIN = "linkedin" 
     INDEED = "indeed"
     ZIP_RECRUITER = "zip_recruiter"
     GLASSDOOR = "glassdoor"

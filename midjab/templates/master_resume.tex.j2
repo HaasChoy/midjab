@@ -1,0 +1,86 @@
+\documentclass[letterpaper,12pt]{article}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage[colorlinks=false, urlcolor=black]{hyperref}
+\addtolength{\oddsidemargin}{-0.6in}
+\addtolength{\evensidemargin}{-0.6in}
+\addtolength{\textwidth}{1.2in}
+\addtolength{\topmargin}{-.8in}
+\addtolength{\textheight}{1.3in}
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+% --- SECTION FORMATTING ---
+\titleformat{\section}{
+  \vspace{-10pt}\scshape\raggedright\normalsize
+}{}{0em}{}[\color{black}\titlerule \vspace{-7pt}]
+
+% --- CUSTOM SUBHEADING COMMAND ---
+\newcommand{\subheading}[1]{\textbf{\small #1}}
+
+\begin{document}
+
+% --- CONTACT INFORMATION ---
+\begin{center}
+    \textbf{\Large {{ full_name }} } \\[2pt]
+    {\small 
+    % We check if fields exist before adding | separator
+    {% if contact_info.location %}{{ contact_info.location }} | {% endif %}
+    {% if contact_info.phone %}{{ contact_info.phone }} | {% endif %}
+    {% if contact_info.email %}\href{mailto:{{ contact_info.email }}}{ {{ contact_info.email }} } | {% endif %}
+    {% if contact_info.github %}\href{ {{ contact_info.github }} }{GitHub} | {% endif %}
+    {% if contact_info.linkedin %}\href{ {{ contact_info.linkedin }} }{LinkedIn} | {% endif %}
+    {% if contact_info.portfolio %}\href{ {{ contact_info.portfolio }} }{Portfolio}{% endif %}
+    }
+\end{center}
+
+
+% --- EXPERIENCE SECTION ---
+\section{Experience}
+
+{% for job in experience %}
+% Note the spaces: { {{ variable }} } to separate LaTeX braces from Jinja
+\subheading{ {{ job.title }} – {{ job.company }} } (\textit{\small {{ job.location }} }) \hfill \textit{\small {{ job.dates }} }
+\begin{itemize}[leftmargin=*, topsep=2pt, itemsep=-4pt]
+    {% for bullet in job.highlights %}
+    % The | latex_escape filter is CRITICAL. It prevents %, $, & from breaking the PDF.
+    \item {{ bullet | latex_escape }}
+    {% endfor %}
+\end{itemize}
+\vspace{-2pt}
+{% endfor %}
+
+
+% --- SKILLS SECTION ---
+\section{Skills}
+
+% We will pass skills as a Dictionary to the template for categorization
+{% for category, items in skills.items() %}
+\subheading{ {{ category }}:} {{ items | join(', ') | latex_escape }} \\
+{% endfor %}
+
+
+% --- PROJECTS SECTION ---
+\section{Academic Projects}
+
+{% for proj in projects %}
+\subheading{ {{ proj.name }} } \hfill \textit{\small {{ proj.dates }} } \\
+\begin{itemize}[leftmargin=*, topsep=0pt, itemsep=-4pt]
+    {% for bullet in proj.highlights %}
+    \item {{ bullet | latex_escape }}
+    {% endfor %}
+\end{itemize}
+\vspace{-0pt}
+{% endfor %}
+
+
+% --- EDUCATION SECTION ---
+\section{Education}
+{% for edu in education %}
+\subheading{ {{ edu.institution }} } \hfill \textit{ {{ edu.dates }} } \\
+{{ edu.degree }} \vspace{6pt}
+{% endfor %}
+
+\end{document}

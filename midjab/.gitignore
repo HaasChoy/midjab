@@ -46,7 +46,7 @@ Thumbs.db
 
 # Generated output from agents
 outputs/
-
+final_applications/
 # User-specific config file
 config/config.ini
 
