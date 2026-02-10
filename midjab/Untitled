@@ -1,0 +1,30 @@
+# Core dependencies
+python-dotenv==1.2.1
+pymongo>=4.6.0
+pydantic>=2.0.0
+
+# LLM and AI
+ollama>=0.1.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Web scraping and HTTP
+requests>=2.31.0
+tls-client>=0.2.0
+urllib3>=2.0.0
+beautifulsoup4>=4.12.0
+selenium>=4.15.0
+selenium-stealth>=1.0.6
+webdriver-manager>=4.0.0
+regex>=2023.0.0
+
+# Template rendering
+jinja2>=3.1.0
+
+# Markdown conversion
+markdownify>=0.11.6
+
+# Optional testing dependencies
+mongomock>=4.1.0
