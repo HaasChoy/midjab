@@ -1,37 +1,3 @@
-"""
-Data Factory: JobSpy → UnifiedJob Adapter Module
-
-This module provides production-ready adapters and persistence logic for ingesting
-job postings from the `jobspy` library (or compatible dict payloads) into our
-UnifiedJob MongoDB collection with safe deduplication and merge semantics.
-
-Key Functions:
---------------
-- adapt_jobspy_to_unified(raw_job, source) -> UnifiedJob
-  Transforms a jobspy.JobPost object (or dict) into a validated UnifiedJob instance.
-
-- save_unified_job(job, upsert=True) -> dict
-  Persists a UnifiedJob to MongoDB with atomic upsert on fingerprint key.
-
-- process_raw_job(raw_job, source, merge_policy=None) -> dict
-  End-to-end pipeline: adapt → fingerprint → save with intelligent merging.
-
-Usage Example:
---------------
-    from agents.data_factory import process_raw_job
-
-    # Process a jobspy JobPost or dict
-    result = process_raw_job(
-        raw_job=jobspy_result,
-        source="linkedin",
-        merge_policy={"source_priority": {"linkedin": 10, "indeed": 5}}
-    )
-
-    if result["status"] == "inserted":
-        print(f"New job saved: {result['fingerprint']}")
-    elif result["status"] == "updated":
-        print(f"Job updated: {result['fingerprint']}")
-"""
 
 import hashlib
 import logging
@@ -56,9 +22,6 @@ from core.models import (
 logger = logging.getLogger("midjab.data_factory")
 
 
-# ============================================================================
-# NORMALIZATION HELPERS
-# ============================================================================
 
 def _safe_str(value: Any, default: str = "") -> str:
     """Safely convert value to string, stripping whitespace."""
@@ -68,10 +31,7 @@ def _safe_str(value: Any, default: str = "") -> str:
 
 
 def _safe_dict_get(obj: Any, key: str, default: Any = None) -> Any:
-    """
-    Safely extract a key from dict-like or attribute-based object.
-    Supports both obj[key] and obj.key access patterns.
-    """
+
     if obj is None:
         return default
     
@@ -85,10 +45,7 @@ def _safe_dict_get(obj: Any, key: str, default: Any = None) -> Any:
 
 
 def _serialize_for_mongo(obj):
-    """
-    Recursively convert obj into Mongo-encodable primitives.
-    Handles: Enum, Pydantic BaseModel, datetime, lists, dicts, objects with __dict__.
-    """
+
     # primitives pass-through
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
@@ -148,7 +105,7 @@ def _serialize_for_mongo(obj):
         return None
 
 def _extract_last_tokens(text: str, n: int = 5) -> str:
-    """Extract last N words from text for fingerprinting fallback."""
+
     if not text:
         return ""
     words = text.split()
@@ -156,10 +113,7 @@ def _extract_last_tokens(text: str, n: int = 5) -> str:
 
 
 def _normalize_compensation(raw_job: Any) -> Optional[UnifiedCompensation]:
-    """
-    Extract and normalize compensation data from raw job object.
-    Handles various field names and formats from different sources.
-    """
+
     # Try multiple common field names
     min_amt = _safe_dict_get(raw_job, "min_amount") or _safe_dict_get(raw_job, "salary_min")
     max_amt = _safe_dict_get(raw_job, "max_amount") or _safe_dict_get(raw_job, "salary_max")
@@ -215,12 +169,7 @@ def _normalize_location(raw_job: Any) -> Optional[UnifiedLocation]:
 
 
 def _normalize_company(raw_job: Any) -> UnifiedCompany:
-    """
-    Extract and normalize company data from raw job object.
-    
-    IMPORTANT: UnifiedCompany schema only has: name, website, id
-    Do NOT populate industry or logo_url (not in schema).
-    """
+
     company_name = _safe_dict_get(raw_job, "company") or _safe_dict_get(raw_job, "company_name")
     company_website = _safe_dict_get(raw_job, "company_url") or _safe_dict_get(raw_job, "company_website")
     company_id = _safe_dict_get(raw_job, "company_id")
@@ -232,9 +181,7 @@ def _normalize_company(raw_job: Any) -> UnifiedCompany:
     )
 
 
-# ============================================================================
-# MERGE POLICY LOGIC
-# ============================================================================
+
 
 def _should_update_field(
     existing_value: Any,
@@ -242,17 +189,7 @@ def _should_update_field(
     field_name: str,
     merge_policy: Optional[Dict[str, Any]] = None
 ) -> bool:
-    """
-    Determine whether to overwrite an existing field with new value.
-    
-    Merge logic:
-    1. If existing is None/empty and new has value -> update
-    2. If new is None/empty -> don't update (never overwrite with None)
-    3. For description: prefer longer content
-    4. For compensation: prefer numeric over None
-    5. For date_posted: prefer more recent
-    6. Consider source_priority if provided in merge_policy
-    """
+
     # Never overwrite with None/empty
     if new_value is None or (isinstance(new_value, str) and not new_value.strip()):
         return False
@@ -307,10 +244,7 @@ def _should_update_field(
 
 
 def _merge_jobs(existing: Dict[str, Any], new_job: UnifiedJob, merge_policy: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    Intelligently merge new job data with existing document.
-    Returns the merged document ready for $set operation.
-    """
+
     merged = new_job.to_mongo()
     
     # Fields to consider for intelligent merging
@@ -335,20 +269,7 @@ def _merge_jobs(existing: Dict[str, Any], new_job: UnifiedJob, merge_policy: Opt
 # ============================================================================
 
 def adapt_jobspy_to_unified(raw_job: Union[dict, object], source: str) -> UnifiedJob:
-    """
-    Transform a jobspy JobPost object or compatible dict into a validated UnifiedJob.
-    
-    Args:
-        raw_job: Either a jobspy.JobPost instance or a dict with job data
-        source: Source identifier (e.g., "linkedin", "indeed", "naukri")
-    
-    Returns:
-        Validated UnifiedJob instance
-    
-    Raises:
-        ValidationError: If the resulting UnifiedJob fails Pydantic validation
-        ValueError: If critical required fields are missing
-    """
+
     try:
         # Extract core fields
         title = _safe_str(_safe_dict_get(raw_job, "title"))
@@ -434,21 +355,7 @@ def adapt_jobspy_to_unified(raw_job: Union[dict, object], source: str) -> Unifie
 
 
 def save_unified_job(job: UnifiedJob, upsert: bool = True) -> dict:
-    """
-    Persist a UnifiedJob to MongoDB with atomic upsert on fingerprint.
-    
-    Args:
-        job: Validated UnifiedJob instance (must have fingerprint set)
-        upsert: If True, use upsert semantics; if False, only insert new
-    
-    Returns:
-        dict with keys:
-            - status: "inserted", "updated", "skipped", or "error"
-            - id: ObjectId of document (if successful)
-            - fingerprint: The job fingerprint
-            - matched_count: Number of documents matched (for updates)
-            - modified_count: Number of documents modified (for updates)
-    """
+
     db = get_db()
     collection = db.jobs
     

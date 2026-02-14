@@ -19,7 +19,7 @@ class UnifiedLocation(BaseModel):
     state: Optional[str] = None
     country: Optional[str] = None
     postal_code: Optional[str] = None
-    geo: Optional[Dict[str, float]] = None  # {"lat": ..., "lon": ...}
+    geo: Optional[Dict[str, float]] = None 
 
     @validator("city", "state", "country", pre=True, always=True)
     def _strip_strings(cls, v):
@@ -29,8 +29,8 @@ class UnifiedLocation(BaseModel):
 class UnifiedCompensation(BaseModel):
     min_amount: Optional[float] = None
     max_amount: Optional[float] = None
-    currency: Optional[str] = None  # ISO 4217
-    interval: Optional[str] = None  # e.g., "yearly", "monthly", "hourly"
+    currency: Optional[str] = None  
+    interval: Optional[str] = None  
 
     @validator("currency", pre=True, always=True)
     def _norm_currency(cls, v):
@@ -42,7 +42,7 @@ class UnifiedCompensation(BaseModel):
 class UnifiedCompany(BaseModel):
     name: Optional[str] = None
     website: Optional[str] = None
-    id: Optional[str] = None  # source-specific company id
+    id: Optional[str] = None 
 
     @validator("name", pre=True, always=True)
     def _strip_name(cls, v):
@@ -62,8 +62,8 @@ class UnifiedJob(BaseModel):
     compensation: Optional[UnifiedCompensation] = None
 
     # Source & provenance
-    source: Optional[str] = None  # e.g., "jobspy", "linkedin", "naukri"
-    source_id: Optional[str] = None  # platform-specific id (if available)
+    source: Optional[str] = None 
+    source_id: Optional[str] = None  
     source_url: Optional[str] = None
     source_metadata: Dict[str, Any] = Field(default_factory=dict)
 
@@ -76,7 +76,7 @@ class UnifiedJob(BaseModel):
     # Soft fields / enrichment
     skills: Optional[List[str]] = None
     job_level: Optional[str] = None
-    employment_type: Optional[str] = None  # Full-time, Part-time, Contract
+    employment_type: Optional[str] = None  
     remote: Optional[bool] = None
 
     # Raw payload (keeps the original scraped object minimally)

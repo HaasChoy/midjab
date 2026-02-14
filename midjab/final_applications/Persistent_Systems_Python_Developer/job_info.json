@@ -1,9 +1,0 @@
-{
-  "company": "Persistent Systems",
-  "job_title": "Python Developer",
-  "processed_at": "2025-07-21T22:45:14.878532",
-  "success": false,
-  "tex_file": "final_applications/Persistent_Systems_Python_Developer/Persistent_Systems_Python_Developer_resume.tex",
-  "pdf_file": null,
-  "error": "pdflatex not found. Please install LaTeX (e.g., TeX Live, MiKTeX)"
-}
