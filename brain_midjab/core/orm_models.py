@@ -1,154 +1,132 @@
-"""
-Relational ORM models for MidJab V3.
-
-These map the new SQL schema:
-users, profiles, companies, job_postings, job_scores, tailored_resumes.
-"""
+"""Relational ORM models mapped to the MidJab V3 final schema."""
 
 from __future__ import annotations
 
-import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from config.database import Base
 
 
-class JobPostingStatus(str, enum.Enum):
-    active = "active"
-    closed = "closed"
-
-
-class TailoredResumeStatus(str, enum.Enum):
-    drafting = "drafting"
-    ready = "ready"
-    compiled = "compiled"
-    failed = "failed"
-
-
 class User(Base):
     __tablename__ = "users"
 
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-
-    profiles: Mapped[list["Profile"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-
-
-class Profile(Base):
-    __tablename__ = "profiles"
-
-    profile_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    raw_tex_content: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    parsed_json_v: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    fingerprint: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-
-    user: Mapped["User"] = relationship(back_populates="profiles")
-    scores: Mapped[list["JobScore"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
-    tailored_resumes: Mapped[list["TailoredResume"]] = relationship(
-        back_populates="profile", cascade="all, delete-orphan"
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-
-class Company(Base):
-    __tablename__ = "companies"
-
-    company_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
-    website: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    industry: Mapped[str | None] = mapped_column(String(150), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-
-    job_postings: Mapped[list["JobPosting"]] = relationship(back_populates="company", cascade="all, delete-orphan")
+    resumes: Mapped[list["Resume"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
-class JobPosting(Base):
-    __tablename__ = "job_postings"
+class Resume(Base):
+    __tablename__ = "resumes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False, default="Master Resume")
+    content_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    raw_latex: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    user: Mapped["User"] = relationship(back_populates="resumes")
+    applications: Mapped[list["Application"]] = relationship(back_populates="resume")
+
+
+class Job(Base):
+    __tablename__ = "jobs"
     __table_args__ = (
-        UniqueConstraint("fingerprint", name="uq_job_postings_fingerprint"),
-        Index("ix_job_postings_status", "status"),
+        Index("idx_jobs_fingerprint", "fingerprint"),
+        Index("idx_jobs_status", "status"),
     )
 
-    job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    company_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("companies.company_id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    company: Mapped[str] = mapped_column(String(255), nullable=False)
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source_platform: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    salary_min: Mapped[float | None] = mapped_column(Float, nullable=True)
-    salary_max: Mapped[float | None] = mapped_column(Float, nullable=True)
-    status: Mapped[JobPostingStatus] = mapped_column(
-        Enum(JobPostingStatus, name="job_posting_status"), default=JobPostingStatus.active, nullable=False
+    source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    salary_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    salary_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    posted_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    scraped_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="NEW")
 
-    company: Mapped["Company"] = relationship(back_populates="job_postings")
-    scores: Mapped[list["JobScore"]] = relationship(back_populates="job_posting", cascade="all, delete-orphan")
-    tailored_resumes: Mapped[list["TailoredResume"]] = relationship(
-        back_populates="job_posting", cascade="all, delete-orphan"
-    )
+    applications: Mapped[list["Application"]] = relationship(back_populates="job", cascade="all, delete-orphan")
 
 
-class JobScore(Base):
-    __tablename__ = "job_scores"
+class Application(Base):
+    __tablename__ = "applications"
     __table_args__ = (
-        Index("ix_job_scores_total_score", "total_score"),
-        UniqueConstraint("job_id", "profile_id", name="uq_job_scores_job_profile"),
+        Index("idx_applications_status", "status"),
+        Index("idx_applications_score", "match_score"),
     )
 
-    score_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    job_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("job_postings.job_id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    profile_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("profiles.profile_id", ondelete="CASCADE"), nullable=False, index=True
+    resume_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("resumes.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    total_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    skill_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    semantic_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-
-    job_posting: Mapped["JobPosting"] = relationship(back_populates="scores")
-    profile: Mapped["Profile"] = relationship(back_populates="scores")
-
-
-class TailoredResume(Base):
-    __tablename__ = "tailored_resumes"
-    __table_args__ = (
-        UniqueConstraint("job_id", "profile_id", name="uq_tailored_resumes_job_profile"),
-        Index("ix_tailored_resumes_status", "status"),
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING")
+    match_score: Mapped[float | None] = mapped_column(Numeric(4, 2), nullable=True)
+    score_reasoning: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    tailored_content: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    generated_pdf_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-
-    resume_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    job_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("job_postings.job_id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    profile_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("profiles.profile_id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    tailored_tex: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[TailoredResumeStatus] = mapped_column(
-        Enum(TailoredResumeStatus, name="tailored_resume_status"),
-        default=TailoredResumeStatus.drafting,
-        nullable=False,
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    job_posting: Mapped["JobPosting"] = relationship(back_populates="tailored_resumes")
-    profile: Mapped["Profile"] = relationship(back_populates="tailored_resumes")
+    job: Mapped["Job"] = relationship(back_populates="applications")
+    resume: Mapped["Resume"] = relationship(back_populates="applications")
+    logs: Mapped[list["PipelineLog"]] = relationship(back_populates="application", cascade="all, delete-orphan")
+
+
+class PipelineLog(Base):
+    __tablename__ = "pipeline_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    application_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    agent_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    action: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    log_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    application: Mapped["Application"] = relationship(back_populates="logs")
 

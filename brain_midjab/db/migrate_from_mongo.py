@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
-"""
-One-time migration utility from MidJab V2 MongoDB to MidJab V3 PostgreSQL.
-
-This script is intentionally conservative:
-- Skips invalid rows instead of hard-failing
-- Uses deterministic mappings by fingerprint where possible
-"""
+"""One-time migration utility from MidJab V2 MongoDB to MidJab V3 final schema."""
 
 from __future__ import annotations
 
-import hashlib
 import os
 import uuid
 from datetime import datetime
@@ -17,11 +10,10 @@ from typing import Any
 
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config.database import SessionLocal
-from core.orm_models import Company, JobPosting, JobPostingStatus, JobScore, Profile, TailoredResume, TailoredResumeStatus, User
+from core.orm_models import Application, Job, PipelineLog, Resume, User
 
 load_dotenv()
 
@@ -34,7 +26,7 @@ def _mongo() -> Any:
     return MongoClient(MONGO_URI)[MONGO_DB]
 
 
-def _safe_float(value: Any) -> float | None:
+def _safe_decimal(value: Any) -> float | None:
     try:
         if value is None:
             return None
@@ -43,29 +35,25 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
-def _status_to_job(status: str | None) -> JobPostingStatus:
-    if (status or "").lower() == "closed":
-        return JobPostingStatus.closed
-    return JobPostingStatus.active
+def _job_status(status: str | None) -> str:
+    value = (status or "NEW").upper()
+    if value in {"NEW", "ACTIVE", "CLOSED", "FAILED", "SCORED"}:
+        return value
+    return "NEW"
 
 
-def _status_to_resume(status: str | None) -> TailoredResumeStatus:
-    mapping = {
-        "pending_draft": TailoredResumeStatus.drafting,
-        "drafting": TailoredResumeStatus.drafting,
-        "ready_to_compile": TailoredResumeStatus.ready,
-        "compiling": TailoredResumeStatus.ready,
-        "completed": TailoredResumeStatus.compiled,
-        "failed": TailoredResumeStatus.failed,
-    }
-    return mapping.get((status or "").lower(), TailoredResumeStatus.drafting)
+def _application_status(status: str | None) -> str:
+    value = (status or "PENDING").upper()
+    if value in {"PENDING", "DRAFTING", "READY", "COMPILED", "FAILED"}:
+        return value
+    return "PENDING"
 
 
 def _get_or_create_migration_user(db: Session) -> User:
     user = db.query(User).filter(User.email == DEFAULT_MIGRATION_EMAIL).first()
     if user:
         return user
-    user = User(email=DEFAULT_MIGRATION_EMAIL, password_hash="MIGRATED_ACCOUNT", created_at=datetime.utcnow())
+    user = User(email=DEFAULT_MIGRATION_EMAIL, name="Migrated User", password_hash="MIGRATED_ACCOUNT")
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -76,123 +64,143 @@ def migrate() -> None:
     mongo = _mongo()
     db = SessionLocal()
 
-    company_by_name: dict[str, uuid.UUID] = {}
     job_by_fingerprint: dict[str, uuid.UUID] = {}
 
     try:
         user = _get_or_create_migration_user(db)
 
-        # Build single profile from existing outputs/user_profile.json if available in Mongo context.
-        profile_payload = mongo.get_collection("user_profile").find_one() or {}
-        if not profile_payload:
-            profile_payload = {"source": "migration"}
-
-        profile_fingerprint = hashlib.sha256(str(profile_payload).encode("utf-8")).hexdigest()
-        profile = db.query(Profile).filter(Profile.fingerprint == profile_fingerprint).first()
-        if not profile:
-            profile = Profile(
-                user_id=user.user_id,
-                raw_tex_content=None,
-                parsed_json_v=profile_payload,
-                fingerprint=profile_fingerprint,
-                created_at=datetime.utcnow(),
+        resume = db.query(Resume).filter(Resume.user_id == user.id, Resume.is_active.is_(True)).first()
+        if resume is None:
+            resume = Resume(
+                user_id=user.id,
+                name="Migrated Resume",
+                content_json={"source": "migration"},
+                raw_latex=None,
+                is_active=True,
             )
-            db.add(profile)
+            db.add(resume)
             db.commit()
-            db.refresh(profile)
+            db.refresh(resume)
 
-        # jobs -> companies + job_postings
+        # jobs
         for doc in mongo.jobs.find({}):
-            company_name = ((doc.get("company") or {}).get("name") or "Unknown Company").strip()[:150]
-            company_id = company_by_name.get(company_name)
-            if company_id is None:
-                company = db.query(Company).filter(Company.name == company_name).first()
-                if not company:
-                    company = Company(
-                        name=company_name,
-                        website=((doc.get("company") or {}).get("website") or None),
-                        industry=None,
-                        created_at=datetime.utcnow(),
-                    )
-                    db.add(company)
-                    db.flush()
-                company_id = company.company_id
-                company_by_name[company_name] = company_id
-
             fingerprint = (doc.get("fingerprint") or "").strip()
             if not fingerprint:
-                fallback = f"{company_name}:{doc.get('title') or ''}:{doc.get('description') or ''}"
-                fingerprint = hashlib.sha256(fallback.encode("utf-8")).hexdigest()
+                fallback = f"{doc.get('company')}:{doc.get('title')}:{doc.get('description')}"
+                fingerprint = uuid.uuid5(uuid.NAMESPACE_DNS, fallback).hex
 
-            posting = db.query(JobPosting).filter(JobPosting.fingerprint == fingerprint).first()
+            posting = db.query(Job).filter(Job.fingerprint == fingerprint).first()
             if posting is None:
-                posting = JobPosting(
-                    company_id=company_id,
-                    title=(doc.get("title") or "Untitled Job")[:200],
-                    description=doc.get("description"),
-                    source_platform=(doc.get("source") or None),
+                company_data = doc.get("company")
+                company_name = (
+                    (company_data.get("name") if isinstance(company_data, dict) else company_data) or "Unknown Company"
+                )
+                location_data = doc.get("location")
+                if isinstance(location_data, dict):
+                    location_text = ", ".join(
+                        [p for p in [location_data.get("city"), location_data.get("state"), location_data.get("country")] if p]
+                    ) or None
+                else:
+                    location_text = location_data
+
+                compensation = doc.get("compensation") if isinstance(doc.get("compensation"), dict) else {}
+                min_amt = _safe_decimal(compensation.get("min_amount"))
+                max_amt = _safe_decimal(compensation.get("max_amount"))
+
+                posting = Job(
                     fingerprint=fingerprint,
-                    salary_min=_safe_float((doc.get("compensation") or {}).get("min_amount")),
-                    salary_max=_safe_float((doc.get("compensation") or {}).get("max_amount")),
-                    status=_status_to_job(doc.get("status")),
-                    created_at=datetime.utcnow(),
+                    title=(doc.get("title") or "Untitled Job")[:255],
+                    company=str(company_name)[:255],
+                    location=(location_text[:255] if isinstance(location_text, str) else None),
+                    description=doc.get("description"),
+                    source=(doc.get("source") or None),
+                    source_url=(doc.get("source_url") or None),
+                    salary_min=int(min_amt) if min_amt is not None else None,
+                    salary_max=int(max_amt) if max_amt is not None else None,
+                    status=_job_status(doc.get("status")),
                 )
                 db.add(posting)
                 db.flush()
 
-            job_by_fingerprint[fingerprint] = posting.job_id
+            job_by_fingerprint[fingerprint] = posting.id
 
         db.commit()
 
-        # job_scores
+        # applications from scoring output
         for doc in mongo.job_scores.find({}):
             job_fp = (doc.get("job_fingerprint") or "").strip()
             job_id = job_by_fingerprint.get(job_fp)
             if not job_id:
                 continue
 
-            score = JobScore(
-                job_id=job_id,
-                profile_id=profile.profile_id,
-                total_score=_safe_float(doc.get("final_score")),
-                skill_score=_safe_float(doc.get("skill_relevance_score")),
-                semantic_score=_safe_float(doc.get("semantic_context_score")),
-                created_at=datetime.utcnow(),
-            )
-            db.add(score)
-            try:
+            app = db.query(Application).filter(Application.job_id == job_id, Application.resume_id == resume.id).first()
+            if app is None:
+                app = Application(job_id=job_id, resume_id=resume.id, status="PENDING")
+                db.add(app)
                 db.flush()
-            except IntegrityError:
-                db.rollback()
 
-        # tailored_applications
+            app.match_score = _safe_decimal(doc.get("final_score"))
+            app.score_reasoning = {
+                "skill_score": _safe_decimal(doc.get("skill_relevance_score")),
+                "semantic_score": _safe_decimal(doc.get("semantic_context_score")),
+                "requirement_score": _safe_decimal(doc.get("requirement_fit_score")),
+                "model_version": doc.get("model_version"),
+            }
+
+            db.add(
+                PipelineLog(
+                    application_id=app.id,
+                    agent_name="opportunity_scorer",
+                    action="score",
+                    message="Migrated scoring data from v2.job_scores",
+                    log_metadata={"source": "job_scores", "doc_id": str(doc.get("_id"))},
+                )
+            )
+
+        # applications from tailored output
         for doc in mongo.tailored_applications.find({}):
             job_fp = (doc.get("job_fingerprint") or "").strip()
             job_id = job_by_fingerprint.get(job_fp)
             if not job_id:
                 continue
 
-            tr = TailoredResume(
-                job_id=job_id,
-                profile_id=profile.profile_id,
-                tailored_tex=doc.get("generated_tex_path"),
-                status=_status_to_resume(doc.get("status")),
-                created_at=doc.get("created_at") or datetime.utcnow(),
-                updated_at=doc.get("last_updated") or datetime.utcnow(),
-            )
-            db.add(tr)
-            try:
+            app = db.query(Application).filter(Application.job_id == job_id, Application.resume_id == resume.id).first()
+            if app is None:
+                app = Application(job_id=job_id, resume_id=resume.id, status="PENDING")
+                db.add(app)
                 db.flush()
-            except IntegrityError:
-                db.rollback()
+
+            app.status = _application_status(doc.get("status"))
+            app.tailored_content = doc.get("structured_content") if isinstance(doc.get("structured_content"), dict) else None
+            app.generated_pdf_path = doc.get("final_pdf_path")
+
+            db.add(
+                PipelineLog(
+                    application_id=app.id,
+                    agent_name="resume_tailor",
+                    action="tailor",
+                    message="Migrated tailored data from v2.tailored_applications",
+                    log_metadata={"source": "tailored_applications", "doc_id": str(doc.get("_id"))},
+                )
+            )
+
+        db.add(
+            PipelineLog(
+                application_id=None,
+                agent_name="migration",
+                action="complete",
+                message="MongoDB to PostgreSQL migration completed",
+                log_metadata={"migrated_at": datetime.utcnow().isoformat()},
+            )
+        )
 
         db.commit()
         print("Migration completed.")
-        print(f"Companies: {db.query(Company).count()}")
-        print(f"Job postings: {db.query(JobPosting).count()}")
-        print(f"Profiles: {db.query(Profile).count()}")
-        print(f"Job scores: {db.query(JobScore).count()}")
-        print(f"Tailored resumes: {db.query(TailoredResume).count()}")
+        print(f"Users: {db.query(User).count()}")
+        print(f"Resumes: {db.query(Resume).count()}")
+        print(f"Jobs: {db.query(Job).count()}")
+        print(f"Applications: {db.query(Application).count()}")
+        print(f"Pipeline logs: {db.query(PipelineLog).count()}")
     finally:
         db.close()
 

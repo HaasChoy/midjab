@@ -1,47 +1,55 @@
 #!/usr/bin/env python3
-"""
-Initialize MidJab V3 PostgreSQL schema.
+"""Schema utility for MidJab V3 final DB.
 
-Usage:
-  python db/init_db.py
-  python db/init_db.py --drop-first
+Default behavior is non-destructive: verifies required tables exist.
+Use --create when you need SQLAlchemy to create missing tables.
 """
 
 from __future__ import annotations
 
-import argparse
 import sys
+
+from sqlalchemy import text
 
 from config.database import Base, engine, test_connection
 from core import orm_models  # noqa: F401  # Ensure models are imported for metadata
+
+REQUIRED_TABLES = ("users", "resumes", "jobs", "applications", "pipeline_logs")
 
 
 def create_schema() -> None:
     Base.metadata.create_all(bind=engine)
 
 
-def drop_schema() -> None:
-    Base.metadata.drop_all(bind=engine)
+def check_schema() -> bool:
+    try:
+        with engine.connect() as conn:
+            for table in REQUIRED_TABLES:
+                conn.execute(text(f"SELECT 1 FROM {table} LIMIT 1"))
+        return True
+    except Exception:
+        return False
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Initialize MidJab V3 DB schema")
-    parser.add_argument("--drop-first", action="store_true", help="Drop all existing tables before create")
-    args = parser.parse_args()
-
     print("Checking database connection...")
     if not test_connection():
         print("Database connection failed. Check DATABASE_URL and server availability.")
         return 1
 
-    if args.drop_first:
-        print("Dropping existing schema...")
-        drop_schema()
+    if check_schema():
+        print("Schema check passed. All required tables are accessible.")
+        return 0
 
-    print("Creating schema...")
+    print("Schema check failed. Attempting to create missing tables...")
     create_schema()
-    print("Schema initialized successfully.")
-    return 0
+
+    if check_schema():
+        print("Schema created and validated successfully.")
+        return 0
+
+    print("Schema validation failed after create attempt.")
+    return 1
 
 
 if __name__ == "__main__":

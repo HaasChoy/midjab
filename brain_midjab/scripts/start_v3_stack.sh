@@ -8,6 +8,6 @@ cd "${SCRIPT_DIR}"
 docker compose -f docker-compose.yml up -d
 
 cd "${PROJECT_ROOT}"
-python db/init_db.py
+python3 db/init_db.py
 
-echo "V3 stack started. PostgreSQL on :5432 and pgAdmin on :8080."
+echo "V3 stack started. PostgreSQL on :5432 and pgAdmin on :5050."

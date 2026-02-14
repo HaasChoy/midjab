@@ -26,7 +26,7 @@ class Base(DeclarativeBase):
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+psycopg2://admin:securepassword123@localhost:5432/midjab_v3",
+    "postgresql+psycopg2://admin:locationenabled@localhost:5432/midjab_v3",
 )
 
 engine = create_engine(

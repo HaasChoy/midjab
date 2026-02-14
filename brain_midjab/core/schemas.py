@@ -1,61 +1,59 @@
-"""
-Pydantic schemas for MidJab V3 relational entities.
-"""
+"""Pydantic schemas aligned to MidJab V3 final SQL schema."""
 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
-from typing import Any
-
 from pydantic import BaseModel, EmailStr, Field
 
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password_hash: str = Field(min_length=8)
+    name: str | None = None
+    password_hash: str | None = Field(default=None, min_length=8)
 
 
 class UserRead(BaseModel):
-    user_id: uuid.UUID
+    id: uuid.UUID
     email: EmailStr
-    created_at: datetime
+    name: str | None = None
 
 
-class ProfileCreate(BaseModel):
+class ResumeCreate(BaseModel):
     user_id: uuid.UUID
-    raw_tex_content: dict[str, Any] | None = None
-    parsed_json_v: dict[str, Any] | None = None
+    name: str = "Master Resume"
+    content_json: dict
+    raw_latex: str | None = None
+    is_active: bool = True
+
+
+class JobCreate(BaseModel):
     fingerprint: str = Field(min_length=64, max_length=64)
-
-
-class CompanyCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=150)
-    website: str | None = None
-    industry: str | None = None
-
-
-class JobPostingCreate(BaseModel):
-    company_id: uuid.UUID
-    title: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=255)
+    company: str = Field(min_length=1, max_length=255)
+    location: str | None = None
     description: str | None = None
-    source_platform: str | None = None
-    fingerprint: str = Field(min_length=64, max_length=64)
-    salary_min: float | None = None
-    salary_max: float | None = None
+    source: str | None = None
+    source_url: str | None = None
+    salary_min: int | None = None
+    salary_max: int | None = None
+    posted_date: str | None = None
+    status: str = "NEW"
 
 
-class JobScoreCreate(BaseModel):
+class ApplicationCreate(BaseModel):
     job_id: uuid.UUID
-    profile_id: uuid.UUID
-    total_score: float | None = None
-    skill_score: float | None = None
-    semantic_score: float | None = None
+    resume_id: uuid.UUID | None = None
+    status: str = "PENDING"
+    match_score: float | None = None
+    score_reasoning: dict | None = None
+    tailored_content: dict | None = None
+    generated_pdf_path: str | None = None
 
 
-class TailoredResumeCreate(BaseModel):
-    job_id: uuid.UUID
-    profile_id: uuid.UUID
-    tailored_tex: str | None = None
-    status: str = "drafting"
+class PipelineLogCreate(BaseModel):
+    application_id: uuid.UUID
+    agent_name: str | None = None
+    action: str | None = None
+    message: str | None = None
+    metadata: dict | None = None
 
