@@ -170,7 +170,7 @@ def adapt_raw_to_job_dict(raw_job: Union[dict, object], source: str) -> Dict[str
     fingerprint = generate_fingerprint(company, title, location, description)
 
     return {
-        "id": str(uuid.uuid4()),
+        "id": uuid.uuid4(),
         "fingerprint": fingerprint,
         "title": title[:255],
         "company": company[:255],

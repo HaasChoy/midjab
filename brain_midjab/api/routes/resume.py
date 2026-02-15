@@ -91,7 +91,7 @@ async def upload_resume_pdf(
 
         # 4. Persist in the resumes table
         resume = Resume(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             user_id=current_user.id,
             name=file.filename,
             content_json=structured_json,
@@ -104,7 +104,7 @@ async def upload_resume_pdf(
         logger.info("Resume %s stored for user %s", resume.id, current_user.id)
 
         return ResumeUploadResponse(
-            resume_id=resume.id,
+            resume_id=str(resume.id),
             name=resume.name,
             content_json=structured_json,
             message="Resume parsed and stored successfully",
@@ -131,8 +131,8 @@ def list_resumes(
     )
     return [
         ResumeRead(
-            id=r.id,
-            user_id=r.user_id,
+            id=str(r.id),
+            user_id=str(r.user_id) if r.user_id else None,
             name=r.name,
             content_json=r.content_json,
             is_active=r.is_active,
@@ -157,8 +157,8 @@ def get_resume(
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
     return ResumeRead(
-        id=resume.id,
-        user_id=resume.user_id,
+        id=str(resume.id),
+        user_id=str(resume.user_id) if resume.user_id else None,
         name=resume.name,
         content_json=resume.content_json,
         is_active=resume.is_active,

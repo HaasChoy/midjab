@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -21,14 +22,21 @@ from agents.state import HiveState
 from config.database import SessionLocal, test_connection
 from core.orm_models import Resume, User
 
+logger = logging.getLogger(__name__)
 
-def _write_profile_json(resume: Resume) -> None:
+def _write_profile_json(*, user_id: str, resume: Resume) -> None:
+    """Write legacy profile context to disk for older node compatibility."""
     os.makedirs("outputs", exist_ok=True)
+    profile_data = dict(resume.content_json or {})
+    profile_data["_user_id"] = user_id
+    profile_data["_resume_id"] = str(resume.id)
     with open("outputs/user_profile.json", "w", encoding="utf-8") as f:
-        json.dump(resume.content_json, f, indent=2)
+        json.dump(profile_data, f, indent=2)
+    logger.info("Wrote legacy profile context to outputs/user_profile.json")
 
 
 def _resolve_user_and_resume(user_email: str, resume_id: str | None) -> tuple[str, str]:
+    logger.info("Resolving user and resume for user_email=%s", user_email)
     with SessionLocal() as session:
         user = session.execute(select(User).where(User.email == user_email)).scalar_one_or_none()
         if user is None:
@@ -46,11 +54,12 @@ def _resolve_user_and_resume(user_email: str, resume_id: str | None) -> tuple[st
         if resume is None:
             raise ValueError("No resume found for user. Upload or activate a resume first.")
 
-        _write_profile_json(resume)
+        _write_profile_json(user_id=str(user.id), resume=resume)
         return str(user.id), str(resume.id)
 
 
 def build_hive_graph():
+    logger.debug("Building Hive graph topology")
     graph = StateGraph(HiveState)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("scout", scout_node)
@@ -83,6 +92,7 @@ def build_hive_graph():
         },
     )
     graph.add_edge("healer", "publisher")
+    logger.debug("Hive graph compiled")
     return graph.compile()
 
 
@@ -95,7 +105,7 @@ def run_hive(
     only_tailor: bool = False,
     only_compile: bool = False,
     max_retries: int = 3,
-    llm_model: str = "phi3.5",
+    llm_model: str = "gemini-1.5-flash",
     min_match_score: float = 6.0,
 ) -> dict[str, Any]:
     if not test_connection():
@@ -107,6 +117,13 @@ def run_hive(
 
     user_id, resolved_resume_id = _resolve_user_and_resume(user_email, resume_id)
     only_mode = "score" if only_score else "tailor" if only_tailor else "compile" if only_compile else None
+    logger.info(
+        "Starting run_hive user_email=%s resume_id=%s mode=%s skip_discovery=%s",
+        user_email,
+        resolved_resume_id,
+        only_mode or "full",
+        skip_discovery,
+    )
 
     initial_state: HiveState = {
         "user_id": user_id,
@@ -127,5 +144,6 @@ def run_hive(
     }
 
     app = build_hive_graph()
-    final_state = app.invoke(initial_state)
+    final_state = app.invoke(initial_state, config={"recursion_limit": 50})
+    logger.info("run_hive completed for user_email=%s resume_id=%s", user_email, resolved_resume_id)
     return final_state

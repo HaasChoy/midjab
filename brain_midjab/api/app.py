@@ -6,6 +6,7 @@ Main API entrypoint. Run with:
     cd brain_midjab && uvicorn api.app:app --reload --port 8000
 """
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -20,11 +21,11 @@ from core import orm_models  # noqa: F401  — register models with SQLAlchemy m
 async def lifespan(application: FastAPI):
     """Startup / shutdown hook — verifies DB is reachable."""
     if test_connection():
-        print("✅ PostgreSQL connection OK")
+        print(" PostgreSQL connection OK")
     else:
-        print("⚠️  PostgreSQL unreachable — some endpoints will fail")
+        print("  PostgreSQL unreachable — some endpoints will fail")
     yield
-    print("🛑 Shutting down MidJab API")
+    print(" Shutting down MidJab API")
 
 
 app = FastAPI(
@@ -49,6 +50,11 @@ app.add_middleware(
 # ── Routes ─────────────────────────────────────────────────────────────
 app.include_router(resume_router, prefix="/api/resume", tags=["resume"])
 app.include_router(pipeline_router, prefix="/api/pipeline", tags=["pipeline"])
+
+# ── Dev routes (only in non-production) ────────────────────────────────
+if os.getenv("ENVIRONMENT") != "production":
+    from api.routes.dev import router as dev_router
+    app.include_router(dev_router, prefix="/api/dev", tags=["dev"])
 
 
 @app.get("/api/health")

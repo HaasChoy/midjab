@@ -13,7 +13,7 @@ def analyst_node(state: HiveState) -> HiveState:
     pending_app_ids: list[str] = []
 
     scorer = OpportunityScorerV3(
-        llm_model=next_state.get("llm_model", "phi3.5"),
+        llm_model=next_state.get("llm_model", "gemini-1.5-flash"),
         resume_id=next_state.get("resume_id"),
     )
     scorer.load_user_profile()

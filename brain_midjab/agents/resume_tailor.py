@@ -21,10 +21,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-import ollama
 from sqlalchemy import select, update
 
 from config.database import SessionLocal
+from config.llm import call_llm, parse_llm_json
 from core.orm_models import Application, Job, PipelineLog
 
 logger = logging.getLogger("midjab.resume_tailor")
@@ -76,26 +76,17 @@ class ResumeTailorV3:
 
     def __init__(
         self,
-        llm_model: str = "phi3.5",
-        ollama_host: str = "http://localhost:11434",
+        llm_model: str = "gemini-1.5-flash",
         profile_path: str = "outputs/user_profile.json",
         min_match_score: float = 6.0,
     ):
         self.llm_model = llm_model
-        self.ollama_host = ollama_host
         self.profile_path = profile_path
         self.min_match_score = min_match_score
 
         # Load profile
         self.user_profile = self._load_profile()
         self.resume_fingerprint = self._profile_fingerprint()
-
-        # Ollama client
-        try:
-            self.ollama_client = ollama.Client(host=ollama_host)
-        except Exception as e:
-            logger.warning("Could not init Ollama client: %s", e)
-            self.ollama_client = None
 
         print(f"✓ ResumeTailorV3 initialized")
         print(f"  - Model: {llm_model}")
@@ -113,50 +104,29 @@ class ResumeTailorV3:
 
     # ─────────────── LLM helpers ───────────────
 
-    def _parse_llm_json(self, content: str) -> Optional[Dict]:
-        if not content:
-            return None
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            pass
-        content = re.sub(r"```json\s*|\s*```", "", content)
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            pass
-        try:
-            s, e = content.find("{"), content.rfind("}")
-            if s != -1 and e > s:
-                return json.loads(content[s : e + 1])
-        except (json.JSONDecodeError, ValueError):
-            pass
-        logger.warning("Failed to parse LLM JSON: %s", content[:200])
-        return None
-
     def _call_llm(self, prompt: str, action: str, app_id: uuid.UUID) -> Optional[Dict]:
-        if not self.ollama_client:
-            return None
-
         start = time.time()
         raw_resp = None
         try:
-            response = self.ollama_client.chat(
+            response = call_llm(
+                prompt=prompt,
                 model=self.llm_model,
-                messages=[{"role": "user", "content": prompt}],
-                format="json",
-                options={"temperature": 0.3, "num_predict": 1000},
+                temperature=0.3,
+                format_json=True,
+                num_predict=1000,
             )
-            raw_resp = response["message"]["content"]
-            parsed = self._parse_llm_json(raw_resp)
-            latency = int((time.time() - start) * 1000)
+            if response and "message" in response:
+                raw_resp = response["message"]["content"]
+                parsed = parse_llm_json(raw_resp)
+                latency = int((time.time() - start) * 1000)
 
-            self._log_pipeline(
-                app_id, "tailor", action,
-                f"LLM call {'ok' if parsed else 'parse_fail'} ({latency}ms)",
-                {"latency_ms": latency, "success": parsed is not None},
-            )
-            return parsed
+                self._log_pipeline(
+                    app_id, "tailor", action,
+                    f"LLM call {'ok' if parsed else 'parse_fail'} ({latency}ms)",
+                    {"latency_ms": latency, "success": parsed is not None},
+                )
+                return parsed
+            return None
         except Exception as e:
             latency = int((time.time() - start) * 1000)
             self._log_pipeline(app_id, "tailor", action, f"LLM error: {e}", {"latency_ms": latency})

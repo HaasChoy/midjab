@@ -25,10 +25,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
-import ollama
 from sqlalchemy import select, update
 
 from config.database import SessionLocal
+from config.llm import call_llm, parse_llm_json
 from core.orm_models import Application, Job, PipelineLog
 
 logger = logging.getLogger("midjab.opportunity_scorer")
@@ -45,19 +45,14 @@ class OpportunityScorerV3:
 
     def __init__(
         self,
-        llm_model: str = "phi3.5",
-        ollama_host: str = "http://localhost:11434",
+        llm_model: str = "gemini-1.5-flash",
         resume_id: Optional[uuid.UUID] = None,
     ):
         self.llm_model = llm_model
-        self.ollama_host = ollama_host
         self.resume_id = resume_id  # optional FK to resumes table
 
         self.user_profile: Optional[dict] = None
         self.user_skills: List[str] = []
-
-        # Ollama client
-        ollama.Client(host=ollama_host)
 
         # Hard-requirement phrases
         self.requirement_phrases = [
@@ -70,7 +65,6 @@ class OpportunityScorerV3:
         self._log("INFO", f"OpportunityScorerV3 initialized — model={llm_model}")
         print(f"✓ OpportunityScorerV3 initialized")
         print(f"  - Model: {llm_model}")
-        print(f"  - Ollama Host: {ollama_host}")
 
     # ─────────────── logging helpers ───────────────
 
@@ -153,57 +147,19 @@ class OpportunityScorerV3:
 
     def _call_llm(self, prompt: str) -> Optional[Dict]:
         try:
-            response = ollama.chat(
+            response = call_llm(
+                prompt=prompt,
                 model=self.llm_model,
-                messages=[{"role": "user", "content": prompt}],
-                format="json",
-                options={"temperature": 0.3, "num_predict": 500},
+                temperature=0.3,
+                format_json=True,
+                num_predict=500,
             )
-            return self._parse_llm_json(response["message"]["content"])
+            if response and "message" in response:
+                return parse_llm_json(response["message"]["content"])
+            return None
         except Exception as e:
             self._log("ERROR", f"LLM call failed: {e}")
             return None
-
-    def _parse_llm_json(self, content: str) -> Optional[Dict]:
-        if not content:
-            return None
-        # Strategy 1: direct parse
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            pass
-        # Strategy 2: strip markdown fences
-        cleaned = re.sub(r"```json\s*|\s*```", "", content).strip()
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
-        # Strategy 3: extract first JSON object
-        try:
-            s, e = cleaned.find("{"), cleaned.rfind("}")
-            if s != -1 and e > s:
-                return json.loads(cleaned[s : e + 1])
-        except (json.JSONDecodeError, ValueError):
-            pass
-        # Strategy 4: ast literal_eval (single-quoted dicts)
-        try:
-            s, e = cleaned.find("{"), cleaned.rfind("}")
-            if s != -1 and e > s:
-                result = ast.literal_eval(cleaned[s : e + 1])
-                if isinstance(result, dict):
-                    return result
-        except (ValueError, SyntaxError):
-            pass
-        # Strategy 5: regex fallback
-        try:
-            sm = re.search(r"[\"']?score[\"']?\s*:\s*([0-9.]+)", content, re.IGNORECASE)
-            rm = re.search(r"[\"']?reasoning[\"']?\s*:\s*[\"']([^\"']+)[\"']", content, re.IGNORECASE | re.DOTALL)
-            if sm:
-                return {"score": float(sm.group(1)), "reasoning": rm.group(1).strip() if rm else "fallback"}
-        except (ValueError, AttributeError):
-            pass
-        self._log("ERROR", f"All parsing strategies failed: {content[:300]}")
-        return None
 
     def _llm_score(self, title: str, description: str) -> Tuple[float, str]:
         user_ctx = {
@@ -370,23 +326,25 @@ Respond with ONLY valid JSON:
 
 # ─────────────── standalone helpers ───────────────
 
-def test_ollama_connection(host: str = "http://localhost:11434", model: str = "phi3.5") -> bool:
+def test_llm_connection(model: str = "gemini-1.5-flash") -> bool:
     print("\n" + "=" * 60)
-    print("TESTING OLLAMA CONNECTION")
+    print("TESTING LLM CONNECTION")
     print("=" * 60)
     try:
-        response = ollama.chat(
+        response = call_llm(
+            prompt=f'Respond with only: {{"status":"ok","model":"{model}"}}',
             model=model,
-            messages=[{"role": "user", "content": f'Respond with only: {{"status":"ok","model":"{model}"}}'}],
-            format="json",
+            format_json=True,
         )
-        result = json.loads(response["message"]["content"])
-        print(f"✓ Connected — model: {result.get('model', model)}")
-        return True
+        if response and "message" in response:
+            result = json.loads(response["message"]["content"])
+            print(f"✓ Connected — model: {result.get('model', model)}")
+            return True
+        return False
     except Exception as e:
         print(f"✗ Failed: {e}")
-        print("  1. Ensure Ollama is running: ollama serve")
-        print(f"  2. Pull model if needed: ollama pull {model}")
+        print("  1. Ensure GOOGLE_API_KEY is set in .env")
+        print("  2. Or ensure Ollama is running: ollama serve")
         return False
 
 
@@ -395,7 +353,7 @@ def main():
     print("OPPORTUNITYSCORER V3 — POSTGRESQL EDITION")
     print("=" * 60)
 
-    if not test_ollama_connection():
+    if not test_llm_connection():
         return
 
     scorer = OpportunityScorerV3()

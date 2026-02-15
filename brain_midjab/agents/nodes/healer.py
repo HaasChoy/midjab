@@ -5,28 +5,17 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-import ollama
 from sqlalchemy import select, update
 
 from agents.state import HiveState
 from config.database import SessionLocal
+from config.llm import call_llm, parse_llm_json
 from core.orm_models import Application, PipelineLog
 
 
 def _parse_json(content: str) -> dict[str, Any] | None:
-    if not content:
-        return None
-    cleaned = content.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        try:
-            start, end = cleaned.find("{"), cleaned.rfind("}")
-            if start != -1 and end > start:
-                return json.loads(cleaned[start : end + 1])
-        except json.JSONDecodeError:
-            return None
-    return None
+    """Deprecated - now using parse_llm_json from config.llm"""
+    return parse_llm_json(content)
 
 
 def healer_node(state: HiveState) -> HiveState:
@@ -47,7 +36,6 @@ def healer_node(state: HiveState) -> HiveState:
         fixed_content = dict(tailored)
 
         try:
-            client = ollama.Client(host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
             prompt = f"""You are fixing LaTeX resume content.
 Compilation failed with this error:
 {compile_error[:2500]}
@@ -56,20 +44,22 @@ Current tailored JSON:
 {json.dumps(tailored)[:5000]}
 
 Return ONLY valid JSON with key "tailored_content" containing fixed content."""
-            response = client.chat(
-                model=next_state.get("llm_model", "phi3.5"),
-                messages=[{"role": "user", "content": prompt}],
-                format="json",
-                options={"temperature": 0.2, "num_predict": 1200},
+            response = call_llm(
+                prompt=prompt,
+                model=next_state.get("llm_model", "gemini-1.5-flash"),
+                temperature=0.2,
+                format_json=True,
+                num_predict=1200,
             )
-            parsed = _parse_json(response["message"]["content"])
-            if isinstance(parsed, dict):
-                if isinstance(parsed.get("tailored_content"), dict):
-                    fixed_content = parsed["tailored_content"]
-                else:
-                    for key in ("summary", "skills", "experience", "projects", "education", "contact_info", "full_name"):
-                        if key in parsed:
-                            fixed_content[key] = parsed[key]
+            if response and "message" in response:
+                parsed = parse_llm_json(response["message"]["content"])
+                if isinstance(parsed, dict):
+                    if isinstance(parsed.get("tailored_content"), dict):
+                        fixed_content = parsed["tailored_content"]
+                    else:
+                        for key in ("summary", "skills", "experience", "projects", "education", "contact_info", "full_name"):
+                            if key in parsed:
+                                fixed_content[key] = parsed[key]
         except Exception:
             fixed_content["latex_fix_notes"] = {
                 "last_error": compile_error[:1000],

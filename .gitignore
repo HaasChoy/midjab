@@ -1,0 +1,62 @@
+# Virtual Environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE / Editor specific
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+
+# Backups
+backups/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Virtual Environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE / Editor specific
+.vscode/
+.idea/
+.env
+# Logs
+logs/
+*.log
+.env
+brain_midjab/.env
+
+# Backups
+backups/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# --- User-Specific Additions ---
+
+# Generated output from agents
+outputs/
+final_applications/
+# User-specific config file
+config/config.ini
+
+# User-specific files in the root directory
+resume.tex
+projectstrucutre.odt
+
+# V3 infrastructure artifacts
+.env
+postgres_data/
+pgadmin_data/

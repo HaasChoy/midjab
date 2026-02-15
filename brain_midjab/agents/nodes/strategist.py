@@ -62,7 +62,7 @@ def strategist_node(state: HiveState) -> HiveState:
     tailored_ids: list[str] = []
 
     tailor = ResumeTailorV3(
-        llm_model=next_state.get("llm_model", "phi3.5"),
+        llm_model=next_state.get("llm_model", "gemini-1.5-flash"),
         min_match_score=min_score,
     )
     base_content = _make_base_content(tailor.user_profile)
