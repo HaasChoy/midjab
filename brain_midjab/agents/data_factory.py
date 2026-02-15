@@ -1,27 +1,40 @@
+"""
+Data Factory V3 — PostgreSQL Edition
+=====================================
+
+Ingests raw job data (from jobspy scrapers or dicts) into the V3 `jobs` table.
+
+Pipeline per job:
+  1. Adapt raw data → flat dict matching the Job ORM columns
+  2. Generate a SHA-256 fingerprint for dedup
+  3. Upsert into `jobs` table (skip if fingerprint exists, or merge)
+  4. Write a pipeline_log entry for auditability
+
+All writes are transactional via SQLAlchemy sessions.
+"""
 
 import hashlib
 import logging
+import re
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Union
+import uuid
 import enum
+from datetime import datetime, timezone, date
+from typing import Any, Dict, List, Optional, Union
+
 from pydantic import BaseModel
-from bson import ObjectId
-from pydantic import ValidationError
-from pymongo.errors import DuplicateKeyError, PyMongoError
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from core.db import get_db
-from core.models import (
-    UnifiedCompany,
-    UnifiedCompensation,
-    UnifiedJob,
-    UnifiedLocation,
-)
+from config.database import SessionLocal
+from core.orm_models import Job, PipelineLog
 
-# Module logger
 logger = logging.getLogger("midjab.data_factory")
 
 
+# ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
 
 def _safe_str(value: Any, default: str = "") -> str:
     """Safely convert value to string, stripping whitespace."""
@@ -30,655 +43,309 @@ def _safe_str(value: Any, default: str = "") -> str:
     return str(value).strip()
 
 
-def _safe_dict_get(obj: Any, key: str, default: Any = None) -> Any:
-
+def _safe_get(obj: Any, key: str, default: Any = None) -> Any:
+    """Get a field from a dict or an object attribute."""
     if obj is None:
         return default
-    
-    # Try dict-like access first
     if isinstance(obj, dict):
         return obj.get(key, default)
-    
-    # Try attribute access (for JobPost objects)
     return getattr(obj, key, default)
 
 
-
-def _serialize_for_mongo(obj):
-
-    # primitives pass-through
+def _serialize(obj: Any) -> Any:
+    """Recursively serialize complex objects to JSON-safe primitives."""
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
-
-    # datetime: leave as-is (pymongo supports datetime)
-    from datetime import datetime
-    if isinstance(obj, datetime):
-        return obj
-
-    # enum -> value if available else name
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
     if isinstance(obj, enum.Enum):
-        try:
-            return obj.value
-        except Exception:
-            return obj.name
-
-    # Pydantic models -> dict
+        return obj.value
     if isinstance(obj, BaseModel):
-        return _serialize_for_mongo(obj.dict())
-
-    # dict -> recurse
+        return _serialize(obj.model_dump())
     if isinstance(obj, dict):
-        out = {}
-        for k, v in obj.items():
-            try:
-                out[k] = _serialize_for_mongo(v)
-            except Exception:
-                out[k] = str(v)
-        return out
-
-    # list/tuple/set -> list recurse
+        return {k: _serialize(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple, set)):
-        return [_serialize_for_mongo(v) for v in obj]
-
-    # objects with .dict() or .__dict__
-    # some jobspy objects might provide .dict() or .to_dict()
-    if hasattr(obj, "dict") and callable(getattr(obj, "dict")):
-        try:
-            return _serialize_for_mongo(obj.dict())
-        except Exception:
-            pass
-    if hasattr(obj, "to_dict") and callable(getattr(obj, "to_dict")):
-        try:
-            return _serialize_for_mongo(obj.to_dict())
-        except Exception:
-            pass
+        return [_serialize(v) for v in obj]
+    if hasattr(obj, "model_dump"):
+        return _serialize(obj.model_dump())
     if hasattr(obj, "__dict__"):
-        try:
-            return _serialize_for_mongo(vars(obj))
-        except Exception:
-            pass
+        return _serialize(vars(obj))
+    return str(obj)
 
-    # Fallback to string
-    try:
-        return str(obj)
-    except Exception:
-        return None
 
 def _extract_last_tokens(text: str, n: int = 5) -> str:
-
     if not text:
         return ""
     words = text.split()
     return " ".join(words[-n:]) if len(words) >= n else text
 
 
-def _normalize_compensation(raw_job: Any) -> Optional[UnifiedCompensation]:
+# ─────────────────────────────────────────────
+# FINGERPRINT
+# ─────────────────────────────────────────────
 
-    # Try multiple common field names
-    min_amt = _safe_dict_get(raw_job, "min_amount") or _safe_dict_get(raw_job, "salary_min")
-    max_amt = _safe_dict_get(raw_job, "max_amount") or _safe_dict_get(raw_job, "salary_max")
-    currency = _safe_dict_get(raw_job, "currency")
-    interval = _safe_dict_get(raw_job, "interval") or _safe_dict_get(raw_job, "pay_period")
-    
-    # Only create compensation if we have at least one amount
-    if min_amt is not None or max_amt is not None:
-        return UnifiedCompensation(
-            min_amount=float(min_amt) if min_amt is not None else None,
-            max_amount=float(max_amt) if max_amt is not None else None,
-            currency=_safe_str(currency) if currency else None,
-            interval=_safe_str(interval) if interval else None
-        )
-    return None
-
-
-def _normalize_location(raw_job: Any) -> Optional[UnifiedLocation]:
-    """Extract and normalize location data from raw job object."""
-    city = _safe_dict_get(raw_job, "city") or _safe_dict_get(raw_job, "location")
-    state = _safe_dict_get(raw_job, "state") or _safe_dict_get(raw_job, "region")
-    country = _safe_dict_get(raw_job, "country")
-    postal_code = _safe_dict_get(raw_job, "postal_code") or _safe_dict_get(raw_job, "zip_code")
-    
-    # Try to parse combined location string if city is missing
-    if not city and _safe_dict_get(raw_job, "location"):
-        location_str = _safe_str(_safe_dict_get(raw_job, "location"))
-        parts = [p.strip() for p in location_str.split(",")]
-        if len(parts) >= 1:
-            city = parts[0]
-        if len(parts) >= 2:
-            state = parts[1]
-        if len(parts) >= 3:
-            country = parts[2]
-    
-    # Parse geo coordinates if available
-    geo = None
-    lat = _safe_dict_get(raw_job, "latitude")
-    lon = _safe_dict_get(raw_job, "longitude")
-    if lat is not None and lon is not None:
-        try:
-            geo = {"lat": float(lat), "lon": float(lon)}
-        except (ValueError, TypeError):
-            pass
-    
-    return UnifiedLocation(
-        city=_safe_str(city) if city else None,
-        state=_safe_str(state) if state else None,
-        country=_safe_str(country) if country else None,
-        postal_code=_safe_str(postal_code) if postal_code else None,
-        geo=geo
-    )
-
-
-def _normalize_company(raw_job: Any) -> UnifiedCompany:
-
-    company_name = _safe_dict_get(raw_job, "company") or _safe_dict_get(raw_job, "company_name")
-    company_website = _safe_dict_get(raw_job, "company_url") or _safe_dict_get(raw_job, "company_website")
-    company_id = _safe_dict_get(raw_job, "company_id")
-    
-    return UnifiedCompany(
-        name=_safe_str(company_name) if company_name else None,
-        website=_safe_str(company_website) if company_website else None,
-        id=_safe_str(company_id) if company_id else None
-    )
-
-
-
-
-def _should_update_field(
-    existing_value: Any,
-    new_value: Any,
-    field_name: str,
-    merge_policy: Optional[Dict[str, Any]] = None
-) -> bool:
-
-    # Never overwrite with None/empty
-    if new_value is None or (isinstance(new_value, str) and not new_value.strip()):
-        return False
-    
-    # Always update if existing is None/empty and new has value
-    if existing_value is None or (isinstance(existing_value, str) and not existing_value.strip()):
-        return True
-    
-    # Field-specific logic
-    if field_name == "description":
-        # Prefer longer descriptions
-        existing_len = len(str(existing_value)) if existing_value else 0
-        new_len = len(str(new_value)) if new_value else 0
-        return new_len > existing_len
-    
-    if field_name == "compensation":
-        # Prefer non-None numeric compensation
-        existing_has_amount = (
-            existing_value and 
-            isinstance(existing_value, dict) and
-            (existing_value.get("min_amount") or existing_value.get("max_amount"))
-        )
-        new_has_amount = (
-            new_value and 
-            isinstance(new_value, dict) and
-            (new_value.get("min_amount") or new_value.get("max_amount"))
-        )
-        # Update if new has amounts and existing doesn't
-        if new_has_amount and not existing_has_amount:
-            return True
-        # If both have amounts, prefer the one with more complete data
-        if new_has_amount and existing_has_amount:
-            new_fields = sum(1 for k in ["min_amount", "max_amount", "currency", "interval"] 
-                           if new_value.get(k) is not None)
-            existing_fields = sum(1 for k in ["min_amount", "max_amount", "currency", "interval"] 
-                                if existing_value.get(k) is not None)
-            return new_fields > existing_fields
-        return False
-    
-    if field_name == "date_posted":
-        # Prefer more recent dates
-        try:
-            existing_dt = existing_value if isinstance(existing_value, datetime) else None
-            new_dt = new_value if isinstance(new_value, datetime) else None
-            if existing_dt and new_dt:
-                return new_dt > existing_dt
-        except:
-            pass
-    
-    # Default: update if we have a value
-    return True
-
-
-def _merge_jobs(existing: Dict[str, Any], new_job: UnifiedJob, merge_policy: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-
-    merged = new_job.to_mongo()
-    
-    # Fields to consider for intelligent merging
-    mergeable_fields = ["description", "compensation", "title", "date_posted", "source_url"]
-    
-    for field in mergeable_fields:
-        existing_value = existing.get(field)
-        new_value = merged.get(field)
-        
-        if not _should_update_field(existing_value, new_value, field, merge_policy):
-            # Keep existing value
-            merged[field] = existing_value
-    
-    # Always update metadata fields
-    merged["date_updated"] = datetime.now(timezone.utc)
-    
-    return merged
-
-
-# ============================================================================
-# CORE ADAPTER FUNCTIONS
-# ============================================================================
-
-def adapt_jobspy_to_unified(raw_job: Union[dict, object], source: str) -> UnifiedJob:
-
-    try:
-        # Extract core fields
-        title = _safe_str(_safe_dict_get(raw_job, "title"))
-        if not title:
-            raise ValueError("Job title is required")
-        
-        description = _safe_str(_safe_dict_get(raw_job, "description"))
-        company = _normalize_company(raw_job)
-        location = _normalize_location(raw_job)
-        compensation = _normalize_compensation(raw_job)
-        
-        # Extract source-specific identifiers
-        source_id = _safe_str(_safe_dict_get(raw_job, "id") or _safe_dict_get(raw_job, "job_id"))
-        source_url = _safe_str(_safe_dict_get(raw_job, "job_url") or _safe_dict_get(raw_job, "url"))
-        
-        # Parse date_posted if available
-        date_posted = _safe_dict_get(raw_job, "date_posted")
-        if isinstance(date_posted, str):
-            try:
-                date_posted = datetime.fromisoformat(date_posted.replace("Z", "+00:00"))
-            except:
-                date_posted = None
-        elif not isinstance(date_posted, datetime):
-            date_posted = None
-        
-        # Collect source-specific metadata (anything not in core fields)
-        source_metadata = {}
-        metadata_fields = [
-            "job_type", "job_level", "benefits", "num_applicants", 
-            "is_remote", "emails", "company_industry", "logo_url",
-            "company_num_employees", "job_function", "seniority_level"
-        ]
-        for field in metadata_fields:
-            value = _safe_dict_get(raw_job, field)
-            if value is not None:
-                source_metadata[field] = _serialize_for_mongo(value)
-        
-        # Preserve original raw payload
-        if isinstance(raw_job, dict):
-            raw_payload = _serialize_for_mongo(raw_job.copy())
-        else:
-            # For object types, try to convert to dict
-            raw_payload = {}
-            for attr in dir(raw_job):
-                if not attr.startswith("_"):
-                    try:
-                        val = getattr(raw_job, attr)
-                        # Skip methods
-                        if not callable(val):
-                            raw_payload[attr] = val
-                    except:
-                        pass
-            raw_payload = _serialize_for_mongo(raw_payload)
-     
-        # Construct UnifiedJob (validation happens here)
-        # IMPORTANT: schema_version must be int, status defaults to "pending_review"
-        unified_job = UnifiedJob(
-            title=title,
-            description=description,
-            company=company,
-            location=location,
-            compensation=compensation,
-            source=source,
-            source_id=source_id if source_id else None,
-            source_url=source_url if source_url else None,
-            source_metadata=source_metadata,
-            date_posted=date_posted,
-            status="pending_review",  # Default status per schema
-            match_score=None,
-            schema_version=1,  # Must be int, not string
-            raw=raw_payload
-        )
-        
-        logger.info(f"Adapted job from {source}: {title} at {company.name or 'Unknown Company'}")
-        return unified_job
-        
-    except ValidationError as e:
-        logger.error(f"Validation failed for job from {source}: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error adapting job from {source}: {e}")
-        raise ValueError(f"Failed to adapt job: {str(e)}")
-
-
-def save_unified_job(job: UnifiedJob, upsert: bool = True) -> dict:
-
-    db = get_db()
-    collection = db.jobs
-    
-    if not job.fingerprint:
-        raise ValueError("Job must have fingerprint set before saving")
-    
-    try:
-        now = datetime.now(timezone.utc)
-        job_dict = job.to_mongo()
-        
-        if upsert:
-            # Atomic upsert with intelligent merging
-            # First, check if document exists to apply merge logic
-            existing = collection.find_one({"fingerprint": job.fingerprint})
-            
-            if existing:
-                # Apply merge logic
-                merged = _merge_jobs(existing, job)
-                result = collection.update_one(
-                    {"fingerprint": job.fingerprint},
-                    {"$set": merged},
-                    upsert=False
-                )
-                
-                return {
-                    "status": "updated" if result.modified_count > 0 else "skipped",
-                    "id": existing["_id"],
-                    "fingerprint": job.fingerprint,
-                    "matched_count": result.matched_count,
-                    "modified_count": result.modified_count
-                }
-            else:
-                # Insert new document
-                job_dict["date_created"] = now
-                job_dict["date_updated"] = now
-                result = collection.insert_one(job_dict)
-                
-                return {
-                    "status": "inserted",
-                    "id": result.inserted_id,
-                    "fingerprint": job.fingerprint,
-                    "matched_count": 0,
-                    "modified_count": 0
-                }
-        else:
-            # Insert only (fail on duplicate)
-            job_dict["date_created"] = now
-            job_dict["date_updated"] = now
-            result = collection.insert_one(job_dict)
-            
-            return {
-                "status": "inserted",
-                "id": result.inserted_id,
-                "fingerprint": job.fingerprint,
-                "matched_count": 0,
-                "modified_count": 0
-            }
-            
-    except DuplicateKeyError:
-        logger.warning(f"Duplicate fingerprint detected: {job.fingerprint}")
-        return {
-            "status": "error",
-            "id": None,
-            "fingerprint": job.fingerprint,
-            "matched_count": 0,
-            "modified_count": 0,
-            "error": "duplicate_key",
-            "message": "Job with this fingerprint already exists"
-        }
-    except PyMongoError as e:
-        logger.error(f"Database error saving job {job.fingerprint}: {e}")
-        raise
-
-
-def _generate_fallback_fingerprint(job: UnifiedJob) -> str:
+def generate_fingerprint(
+    company: str,
+    title: str,
+    location: Optional[str] = None,
+    description: Optional[str] = None,
+    extra_tokens: int = 5,
+) -> str:
     """
-    Generate a deterministic SHA-256 fingerprint as fallback.
-    Uses: company + title + city + last 5 description tokens.
-    Returns first 32 chars of hex digest.
+    Deterministic SHA-256 fingerprint for job dedup.
+
+    Strategy: lower(company) :: lower(title) :: lower(location) :: last_n_desc_tokens
+    Returns the full 64-char hex digest.
     """
-    components = [
-        job.company.name or "",
-        job.title or "",
-        job.location.city if job.location else "",
-        _extract_last_tokens(job.description, 5)
+    parts = [
+        (company or "").strip().lower(),
+        (title or "").strip().lower(),
+        (location or "").strip().lower(),
+        _extract_last_tokens((description or "").lower(), extra_tokens),
     ]
-    
-    fingerprint_string = "|".join(c.lower().strip() for c in components if c)
-    return hashlib.sha256(fingerprint_string.encode()).hexdigest()[:32]
+    raw = "::".join(parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _retry_with_backoff(func, max_attempts: int = 3, base_delay: float = 0.5):
+# ─────────────────────────────────────────────
+# ADAPTER: raw job → flat dict for Job table
+# ─────────────────────────────────────────────
+
+def adapt_raw_to_job_dict(raw_job: Union[dict, object], source: str) -> Dict[str, Any]:
     """
-    Retry a function with exponential backoff on transient errors.
-    
-    Args:
-        func: Callable to retry
-        max_attempts: Maximum number of retry attempts
-        base_delay: Base delay in seconds (doubles each retry)
-    
-    Returns:
-        Result of successful function call
-    
-    Raises:
-        Last exception if all retries fail
+    Convert a jobspy JobPost object (or a dict) to a flat dict
+    matching the `jobs` table columns.
+
+    Raises ValueError if the required 'title' field is missing.
     """
-    last_exception = None
-    
+    title = _safe_str(_safe_get(raw_job, "title"))
+    if not title:
+        raise ValueError("Job title is required")
+
+    company = _safe_str(
+        _safe_get(raw_job, "company") or _safe_get(raw_job, "company_name")
+    )
+    if not company:
+        company = "Unknown"
+
+    # Location — try city, then location string
+    location = _safe_str(_safe_get(raw_job, "location"))
+    if not location:
+        city = _safe_str(_safe_get(raw_job, "city"))
+        state = _safe_str(_safe_get(raw_job, "state"))
+        country = _safe_str(_safe_get(raw_job, "country"))
+        parts = [p for p in (city, state, country) if p]
+        location = ", ".join(parts) if parts else None
+
+    description = _safe_str(_safe_get(raw_job, "description"))
+    source_url = _safe_str(
+        _safe_get(raw_job, "job_url") or _safe_get(raw_job, "url") or _safe_get(raw_job, "source_url")
+    ) or None
+
+    # Salary
+    salary_min = _safe_get(raw_job, "min_amount") or _safe_get(raw_job, "salary_min")
+    salary_max = _safe_get(raw_job, "max_amount") or _safe_get(raw_job, "salary_max")
+    try:
+        salary_min = int(salary_min) if salary_min is not None else None
+    except (ValueError, TypeError):
+        salary_min = None
+    try:
+        salary_max = int(salary_max) if salary_max is not None else None
+    except (ValueError, TypeError):
+        salary_max = None
+
+    # Date posted
+    posted_date = _safe_get(raw_job, "date_posted")
+    if isinstance(posted_date, str):
+        try:
+            posted_date = datetime.fromisoformat(posted_date.replace("Z", "+00:00")).date()
+        except (ValueError, TypeError):
+            posted_date = None
+    elif isinstance(posted_date, datetime):
+        posted_date = posted_date.date()
+    elif not isinstance(posted_date, date):
+        posted_date = None
+
+    # Fingerprint
+    fingerprint = generate_fingerprint(company, title, location, description)
+
+    return {
+        "id": str(uuid.uuid4()),
+        "fingerprint": fingerprint,
+        "title": title[:255],
+        "company": company[:255],
+        "location": (location[:255] if location else None),
+        "description": description or None,
+        "source": (source[:50] if source else None),
+        "source_url": source_url,
+        "salary_min": salary_min,
+        "salary_max": salary_max,
+        "posted_date": posted_date,
+        "status": "NEW",
+    }
+
+
+# ─────────────────────────────────────────────
+# MERGE LOGIC
+# ─────────────────────────────────────────────
+
+def _should_update(existing_val: Any, new_val: Any, field: str) -> bool:
+    """Decide whether to overwrite an existing field value."""
+    if new_val is None or (isinstance(new_val, str) and not new_val.strip()):
+        return False
+    if existing_val is None or (isinstance(existing_val, str) and not existing_val.strip()):
+        return True
+    if field == "description":
+        return len(str(new_val)) > len(str(existing_val))
+    return False  # default: keep existing non-null
+
+
+# ─────────────────────────────────────────────
+# CORE: save one job
+# ─────────────────────────────────────────────
+
+def save_job(job_dict: Dict[str, Any], upsert: bool = True) -> Dict[str, Any]:
+    """
+    Insert or upsert a single job into the `jobs` table.
+
+    Returns a dict with status, fingerprint, and id.
+    """
+    fingerprint = job_dict["fingerprint"]
+
+    with SessionLocal() as session:
+        try:
+            existing = session.execute(
+                select(Job).where(Job.fingerprint == fingerprint)
+            ).scalar_one_or_none()
+
+            if existing:
+                if not upsert:
+                    return {"status": "skipped", "fingerprint": fingerprint, "id": str(existing.id)}
+
+                # Intelligent merge — update only improved fields
+                mergeable = ["description", "location", "source_url", "salary_min", "salary_max"]
+                changed = False
+                for field in mergeable:
+                    new_val = job_dict.get(field)
+                    old_val = getattr(existing, field, None)
+                    if _should_update(old_val, new_val, field):
+                        setattr(existing, field, new_val)
+                        changed = True
+
+                if changed:
+                    session.commit()
+                    return {"status": "updated", "fingerprint": fingerprint, "id": str(existing.id)}
+                else:
+                    return {"status": "skipped", "fingerprint": fingerprint, "id": str(existing.id)}
+            else:
+                job = Job(**job_dict)
+                session.add(job)
+                session.commit()
+                return {"status": "inserted", "fingerprint": fingerprint, "id": str(job.id)}
+
+        except IntegrityError:
+            session.rollback()
+            logger.warning("Duplicate fingerprint on insert: %s", fingerprint)
+            return {"status": "duplicate", "fingerprint": fingerprint, "id": None}
+        except SQLAlchemyError as e:
+            session.rollback()
+            logger.error("DB error saving job %s: %s", fingerprint, e)
+            raise
+
+
+def _log_pipeline(application_id: Optional[uuid.UUID], agent: str, action: str, message: str, metadata: Optional[dict] = None):
+    """Write one pipeline_log row."""
+    with SessionLocal() as session:
+        log = PipelineLog(
+            application_id=application_id,
+            agent_name=agent[:50] if agent else None,
+            action=action[:50] if action else None,
+            message=message,
+            log_metadata=metadata,
+        )
+        session.add(log)
+        session.commit()
+
+
+# ─────────────────────────────────────────────
+# RETRY HELPER
+# ─────────────────────────────────────────────
+
+def _retry(func, max_attempts: int = 3, base_delay: float = 0.5):
+    """Retry with exponential backoff on transient DB errors."""
+    last_exc = None
     for attempt in range(max_attempts):
         try:
             return func()
-        except (PyMongoError, ConnectionError, TimeoutError) as e:
-            last_exception = e
+        except (SQLAlchemyError, ConnectionError, TimeoutError) as e:
+            last_exc = e
             if attempt < max_attempts - 1:
                 delay = base_delay * (2 ** attempt)
-                logger.warning(f"Transient error (attempt {attempt + 1}/{max_attempts}): {e}. Retrying in {delay}s...")
+                logger.warning("Transient error (attempt %d/%d): %s — retrying in %.1fs",
+                               attempt + 1, max_attempts, e, delay)
                 time.sleep(delay)
             else:
-                logger.error(f"All {max_attempts} retry attempts failed")
-    
-    raise last_exception
+                logger.error("All %d retry attempts failed", max_attempts)
+    raise last_exc
 
+
+# ─────────────────────────────────────────────
+# PUBLIC API
+# ─────────────────────────────────────────────
 
 def process_raw_job(
     raw_job: Union[dict, object],
     source: str,
-    merge_policy: Optional[Dict[str, Any]] = None
-) -> dict:
+) -> Dict[str, Any]:
     """
-    End-to-end pipeline: adapt → fingerprint → save with retries and error handling.
-    
-    Args:
-        raw_job: jobspy JobPost object or compatible dict
-        source: Source identifier (e.g., "linkedin", "indeed")
-        merge_policy: Optional dict controlling merge behavior:
-            - source_priority: dict mapping source names to priority scores
-    
-    Returns:
-        dict with keys:
-            - status: "inserted", "updated", "skipped", or "error"
-            - id: ObjectId of saved document (if successful)
-            - fingerprint: The job fingerprint
-            - details: Additional context (validation errors, exception messages, etc.)
+    End-to-end pipeline: adapt → fingerprint → save (with retries).
+
+    Returns dict with status, fingerprint, id, and details.
     """
     try:
-        # Step 1: Adapt to UnifiedJob
-        logger.info(f"Processing job from {source}")
-        unified_job = adapt_jobspy_to_unified(raw_job, source)
-        
-        # Step 2: Generate fingerprint
-        try:
-            fingerprint = unified_job.generate_fingerprint(extra_tokens=5)
-            unified_job.fingerprint = fingerprint
-        except Exception as e:
-            logger.warning(f"Primary fingerprint generation failed: {e}. Using fallback.")
-            unified_job.fingerprint = _generate_fallback_fingerprint(unified_job)
-        
-        logger.info(f"Generated fingerprint: {unified_job.fingerprint}")
-        
-        # Step 3: Save with retry logic
-        def save_operation():
-            return save_unified_job(unified_job, upsert=True)
-        
-        save_result = _retry_with_backoff(save_operation, max_attempts=3)
-        
-        # Enhance result with additional context
-        save_result["details"] = {
+        logger.info("Processing job from %s", source)
+        job_dict = adapt_raw_to_job_dict(raw_job, source)
+        fingerprint = job_dict["fingerprint"]
+        logger.info("Generated fingerprint: %s", fingerprint)
+
+        result = _retry(lambda: save_job(job_dict, upsert=True))
+
+        result["details"] = {
             "source": source,
-            "title": unified_job.title,
-            "company": unified_job.company.name or "Unknown"
+            "title": job_dict["title"],
+            "company": job_dict["company"],
         }
-        
-        logger.info(f"Job {save_result['status']}: {unified_job.fingerprint}")
-        return save_result
-        
-    except ValidationError as e:
-        # Pydantic validation failed
-        error_details = {
-            "validation_errors": e.errors(),
-            "source": source,
-            "raw_payload": raw_job if isinstance(raw_job, dict) else str(raw_job)[:500]
-        }
-        logger.error(f"Validation failed for job from {source}: {error_details}")
-        
-        return {
-            "status": "error",
-            "id": None,
-            "fingerprint": None,
-            "details": error_details
-        }
-        
+
+        # Log the ingest event
+        _log_pipeline(
+            application_id=None,
+            agent="data_factory",
+            action="ingest",
+            message=f"{result['status']}: {job_dict['title']} @ {job_dict['company']}",
+            metadata={"source": source, "fingerprint": fingerprint},
+        )
+
+        logger.info("Job %s: %s", result["status"], fingerprint)
+        return result
+
+    except ValueError as e:
+        logger.error("Validation error from %s: %s", source, e)
+        return {"status": "error", "fingerprint": None, "id": None, "details": {"error": str(e), "source": source}}
     except Exception as e:
-        # Unexpected error
-        error_details = {
-            "error_type": type(e).__name__,
-            "error_message": str(e),
-            "source": source
-        }
-        logger.error(f"Unexpected error processing job from {source}: {error_details}")
-        
-        return {
-            "status": "error",
-            "id": None,
-            "fingerprint": None,
-            "details": error_details
-        }
+        logger.error("Unexpected error from %s: %s", source, e)
+        return {"status": "error", "fingerprint": None, "id": None, "details": {"error": str(e), "source": source}}
 
 
-# ============================================================================
-# DESIGN NOTES & ENHANCEMENT SUGGESTIONS
-# ============================================================================
-
-"""
-DESIGN DECISIONS:
------------------
-
-1. **Schema Compliance**: The adapter strictly follows the actual UnifiedJob schema:
-   - UnifiedCompany only has: name, website, id (no industry/logo_url)
-   - schema_version is an int (not string)
-   - status defaults to "pending_review"
-   - All optional fields properly handle None values
-
-2. **Duck-typing for jobspy objects**: The adapter uses _safe_dict_get() to support
-   both dict and object access patterns, avoiding hard dependency on jobspy library.
-
-3. **Intelligent merge logic**: When upserting, we don't blindly overwrite fields.
-   The _should_update_field() function implements sensible defaults:
-   - Never overwrite with None/empty values
-   - Prefer longer descriptions
-   - Prefer richer compensation (more fields populated)
-   - Prefer more recent date_posted
-
-4. **Fingerprint fallback**: If UnifiedJob.generate_fingerprint() fails, we fall
-   back to a SHA-256 hash of company|title|city|description_tokens (first 32 chars).
-
-5. **Retry logic**: Transient DB errors (network issues, replica lag) are retried
-   3 times with exponential backoff (0.5s, 1s, 2s).
-
-6. **Structured logging**: All operations log with source, source_id, and fingerprint
-   for easy debugging and monitoring.
-
-7. **Source metadata preservation**: Fields like job_type, benefits, logo_url, etc.
-   that aren't in the core schema are preserved in source_metadata for future use.
-
-SUGGESTED ENHANCEMENTS:
------------------------
-
-1. **TTL Index**: Add a TTL index on `date_posted` to auto-expire old job listings:
-   ```python
-   collection.create_index("date_posted", expireAfterSeconds=60*60*24*90)  # 90 days
-   ```
-
-2. **Source tracking**: Add a `source_first_seen` timestamp to track when we first
-   ingested a job from each source. Useful for deduplication across sources.
-
-3. **Batch processing**: Add a `process_raw_jobs_batch()` function that uses
-   bulk_write() for efficient bulk ingestion (100+ jobs).
-
-4. **Advanced merge policies**: 
-   - Add source_priority weighting (e.g., LinkedIn > Indeed)
-   - Add field-level merge strategies (always_update, never_update, prefer_longest)
-   - Add conflict resolution callbacks
-
-5. **Metrics/monitoring**: Integrate with prometheus_client or similar to track:
-   - Jobs ingested per source
-   - Duplicate rate
-   - Validation failure rate
-   - Average processing time
-
-6. **Async support**: Convert to async/await with motor for better throughput in
-   high-volume pipelines.
-
-7. **Schema evolution**: Add migration helpers for when schema_version changes,
-   allowing seamless upgrades of existing documents.
-
-UNIT TEST IDEAS:
-----------------
-
-1. test_adapt_valid_jobspy_dict():
-   - Pass a complete dict with all fields
-   - Assert UnifiedJob is created with correct mappings
-   - Verify nested objects (company, location, compensation)
-   - Verify schema_version is int, status is "pending_review"
-
-2. test_adapt_missing_required_fields():
-   - Pass dict without title
-   - Assert ValueError is raised
-
-3. test_adapt_excludes_invalid_fields():
-   - Pass dict with industry/logo_url in company
-   - Assert these fields go to source_metadata, not company object
-   - Verify no validation errors
-
-4. test_save_new_job():
-   - Create UnifiedJob with fingerprint
-   - Call save_unified_job()
-   - Assert status="inserted" and valid ObjectId returned
-
-5. test_save_duplicate_fingerprint():
-   - Insert job with fingerprint A
-   - Insert same job again
-   - Assert status="skipped" and matched_count=1
-
-6. test_merge_prefers_longer_description():
-   - Insert job with short description
-   - Update with longer description via process_raw_job()
-   - Assert description was updated
-   - Update with shorter description
-   - Assert description was NOT updated
-
-7. test_merge_never_overwrites_with_none():
-   - Insert job with full compensation
-   - Update with job missing compensation
-   - Assert original compensation preserved
-
-8. test_retry_on_transient_db_failure():
-   - Mock pymongo to raise PyMongoError twice, succeed on third
-   - Call process_raw_job()
-   - Assert successful save after retries
-   - Verify 3 total attempts in logs
-
-9. test_fallback_fingerprint():
-   - Mock UnifiedJob.generate_fingerprint() to raise exception
-   - Call process_raw_job()
-   - Assert fallback SHA-256 fingerprint was generated (32 chars)
-"""
+def process_raw_jobs_batch(
+    raw_jobs: List[Union[dict, object]],
+    source: str,
+) -> Dict[str, int]:
+    """
+    Batch ingest. Returns summary counts.
+    """
+    counts = {"inserted": 0, "updated": 0, "skipped": 0, "duplicate": 0, "error": 0}
+    for raw in raw_jobs:
+        result = process_raw_job(raw, source)
+        status = result.get("status", "error")
+        counts[status] = counts.get(status, 0) + 1
+    return counts

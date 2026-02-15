@@ -14,7 +14,10 @@ from sqlalchemy import text
 from config.database import Base, engine, test_connection
 from core import orm_models  # noqa: F401  # Ensure models are imported for metadata
 
-REQUIRED_TABLES = ("users", "resumes", "jobs", "applications", "pipeline_logs")
+REQUIRED_TABLES = (
+    "users", "sessions", "accounts", "verifications",  # auth tables (Better Auth)
+    "resumes", "jobs", "applications", "pipeline_logs",  # domain tables
+)
 
 
 def create_schema() -> None:
