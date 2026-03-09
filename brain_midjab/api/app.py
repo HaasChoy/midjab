@@ -9,12 +9,15 @@ Main API entrypoint. Run with:
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
+from api.rate_limit import limiter
 from api.routes import resume_router, pipeline_router
 from config.database import test_connection
-from core import orm_models  # noqa: F401  — register models with SQLAlchemy metadata
+from core import orm_models  # noqa: F401 — ensure models are registered
 
 
 @asynccontextmanager
@@ -34,6 +37,10 @@ app = FastAPI(
     version="3.0.0",
     lifespan=lifespan,
 )
+
+# ── Rate limiting ──────────────────────────────────────────────────────
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ── CORS — allow the Next.js frontend (Better Auth) to call this API ──
 app.add_middleware(

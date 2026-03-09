@@ -1,5 +1,8 @@
 """
 Development/testing endpoints — remove in production or protect with API key.
+
+Requires the ``X-Dev-Key`` header to match the ``DEV_API_KEY`` env var
+(defaults to "midjab-dev-key" in dev for convenience).
 """
 
 from __future__ import annotations
@@ -9,7 +12,7 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -20,6 +23,23 @@ logger = logging.getLogger("midjab.api.dev")
 
 router = APIRouter()
 
+# ── Dev API key guard ──────────────────────────────────────────────────────────
+
+DEV_API_KEY = os.getenv("DEV_API_KEY", "midjab-dev-key")
+
+
+def require_dev_key(
+    x_dev_key: str | None = Header(default=None, alias="X-Dev-Key"),
+) -> None:
+    """Reject requests without a valid dev API key."""
+    if os.getenv("ENVIRONMENT") == "production":
+        raise HTTPException(status_code=403, detail="Not available in production")
+    if not x_dev_key or x_dev_key != DEV_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing X-Dev-Key header")
+
+
+# ── Schemas ────────────────────────────────────────────────────────────────────
+
 
 class TestUserCreate(BaseModel):
     email: str
@@ -27,7 +47,10 @@ class TestUserCreate(BaseModel):
     password: str = "testpass123"
 
 
-@router.post("/create-test-user")
+# ── Endpoints ──────────────────────────────────────────────────────────────────
+
+
+@router.post("/create-test-user", dependencies=[Depends(require_dev_key)])
 def create_test_user(
     body: TestUserCreate,
     db: Session = Depends(get_db_session),
@@ -36,10 +59,8 @@ def create_test_user(
     Create a test user and return a session token for testing.
 
     ⚠️ WARNING: Only enable in development/testing environments!
+    Requires X-Dev-Key header.
     """
-    if os.getenv("ENVIRONMENT") == "production":
-        raise HTTPException(status_code=403, detail="Not available in production")
-
     # Check if user exists
     existing = db.query(User).filter(User.email == body.email).first()
     if existing:
@@ -72,21 +93,19 @@ def create_test_user(
         "email": user.email,
         "session_token": session_token,
         "cookie_value": f"{session_token}.dummy_signature",
-        "message": "Test user created. Use session_token in Cookie header as 'better-auth.session_token'"
+        "message": "Test user created. Use session_token in Cookie header as 'better-auth.session_token'",
     }
 
 
-@router.post("/create-test-user-with-resume")
+@router.post("/create-test-user-with-resume", dependencies=[Depends(require_dev_key)])
 def create_test_user_with_resume(
     body: TestUserCreate,
     db: Session = Depends(get_db_session),
 ):
     """
     Create a test user, session, and a sample resume for quick testing.
+    Requires X-Dev-Key header.
     """
-    if os.getenv("ENVIRONMENT") == "production":
-        raise HTTPException(status_code=403, detail="Not available in production")
-
     from core.orm_models import Resume
 
     # Create user
@@ -121,7 +140,7 @@ def create_test_user_with_resume(
             "name": body.name or "Test User",
             "email": body.email,
             "phone": "+1-555-0100",
-            "location": "San Francisco, CA"
+            "location": "San Francisco, CA",
         },
         "summary": "Experienced software engineer with expertise in Python, FastAPI, and PostgreSQL.",
         "experience": [
@@ -134,18 +153,18 @@ def create_test_user_with_resume(
                 "bullets": [
                     "Developed REST APIs using FastAPI",
                     "Managed PostgreSQL databases",
-                    "Led team of 5 engineers"
-                ]
+                    "Led team of 5 engineers",
+                ],
             }
         ],
         "education": [
             {
                 "degree": "BS Computer Science",
                 "school": "University of California",
-                "graduation_year": "2018"
+                "graduation_year": "2018",
             }
         ],
-        "skills": ["Python", "FastAPI", "PostgreSQL", "Docker", "AWS"]
+        "skills": ["Python", "FastAPI", "PostgreSQL", "Docker", "AWS"],
     }
 
     resume = Resume(
@@ -165,5 +184,5 @@ def create_test_user_with_resume(
         "session_token": session_token,
         "cookie_value": f"{session_token}.dummy_signature",
         "resume_id": str(resume.id),
-        "message": "Test user and resume created. Use session_token in Cookie header."
+        "message": "Test user and resume created. Use session_token in Cookie header.",
     }
