@@ -4,7 +4,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useSession, signOut } from "@/lib/auth-client";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// Same-origin proxy so the Better Auth session cookie is sent (see next.config rewrites)
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api/backend";
 
 interface ResumeEntry {
   resume_id?: string;
