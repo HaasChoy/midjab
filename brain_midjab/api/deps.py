@@ -1,8 +1,9 @@
 """
 Shared FastAPI dependencies.
 
-`get_current_user` validates the Better Auth session cookie by querying
-the sessions table directly — no JS runtime needed on the Python side.
+`get_current_user` validates the Better Auth session by querying the
+sessions table (cookie or Authorization: Bearer). Aligned with Better Auth:
+sessions.token holds the session token; cookie may be raw token or token.signature.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Cookie, Depends, HTTPException, Request, status
+from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -25,38 +26,46 @@ logger = logging.getLogger("midjab.auth")
 SESSION_EXTEND_MINUTES = int(os.getenv("SESSION_EXTEND_MINUTES", "30"))
 
 
+def _normalize_token(raw: str) -> str:
+    """Use token part before the dot (Better Auth may send token.signature)."""
+    return raw.split(".")[0] if "." in raw else raw
+
+
 async def get_current_user(
     request: Request,
+    authorization: str | None = Header(default=None),
     better_auth_session_token: str | None = Cookie(
         default=None, alias="better-auth.session_token"
     ),
     db: Session = Depends(get_db_session),
 ) -> User:
-    """Resolve the authenticated user from the Better Auth session cookie.
+    """Resolve the authenticated user from Better Auth session.
 
-    Better Auth stores the cookie value as ``<token>.<signature>``.
-    Only the *token* part is persisted in the ``sessions`` table.
+    Accepts either:
+      - Cookie: better-auth.session_token (same-origin or proxied requests)
+      - Header: Authorization: Bearer <token> (e.g. Postman, server-side)
 
-    Security hardening:
-      - Timing-safe token comparison
-      - Structured logging for failed attempts
-      - Sliding-window session extension
+    Better Auth stores the session token in sessions.token; the cookie may be
+    the raw token or ``<token>.<signature>``. We use the token part before the dot.
+
+    Security: timing-safe comparison, structured logging, sliding-window extension.
     """
     client_ip = request.client.host if request.client else "unknown"
 
-    if not better_auth_session_token:
-        logger.warning("AUTH_FAIL | ip=%s | reason=missing_cookie", client_ip)
+    raw: str | None = None
+    if authorization and authorization.startswith("Bearer "):
+        raw = authorization[7:].strip()
+    if not raw and better_auth_session_token:
+        raw = better_auth_session_token
+
+    if not raw:
+        logger.warning("AUTH_FAIL | ip=%s | reason=missing_cookie_or_header", client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated — missing session cookie",
+            detail="Not authenticated — missing session cookie or Authorization: Bearer",
         )
 
-    # Extract the token portion (before the dot)
-    token = (
-        better_auth_session_token.split(".")[0]
-        if "." in better_auth_session_token
-        else better_auth_session_token
-    )
+    token = _normalize_token(raw)
 
     # Look up session + user in one query
     stmt = (

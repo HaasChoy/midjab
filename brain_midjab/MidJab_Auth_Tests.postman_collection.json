@@ -1,0 +1,259 @@
+{
+    "info": {
+        "name": "MidJab V3 — Auth & API Tests",
+        "description": "Postman collection for testing MidJab backend authentication and protected endpoints.\n\nAuth: Better Auth only.\n\nWorkflow:\n1. Run '1. Health Check' to verify the API is up.\n2. Sign in via the Next.js app (http://localhost:3000/login) or Better Auth API.\n3. Get a session token: copy the 'better-auth.session_token' cookie value from DevTools, or use the token part from the sessions table.\n4. Set collection variables: session_cookie = full cookie value (for Cookie header), and/or bearer_token = token part (for Authorization: Bearer).\n5. Run '4. Valid Session (Cookie)' or '4b. Valid Session (Bearer)' to hit protected endpoints.\n\nThe API accepts either Cookie: better-auth.session_token=... or Authorization: Bearer <token>.",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "variable": [
+        {
+            "key": "base_url",
+            "value": "http://localhost:8000",
+            "type": "string"
+        },
+        {
+            "key": "session_cookie",
+            "value": "",
+            "type": "string",
+            "description": "Full value of better-auth.session_token cookie (DevTools → Application → Cookies)"
+        },
+        {
+            "key": "bearer_token",
+            "value": "",
+            "type": "string",
+            "description": "Session token for Authorization: Bearer (token part only, or same as session_cookie)"
+        },
+        {
+            "key": "resume_id",
+            "value": "",
+            "type": "string",
+            "description": "Optional: paste a resume ID for GET /api/resume/{resume_id} requests"
+        }
+    ],
+    "item": [
+        {
+            "name": "Health & Setup",
+            "item": [
+                {
+                    "name": "1. Health Check",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/health",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "health"
+                            ]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "pm.test('Server is healthy', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "    var json = pm.response.json();",
+                                    "    pm.expect(json.status).to.eql('ok');",
+                                    "    pm.expect(json.db).to.eql(true);",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "name": "Auth Validation",
+            "item": [
+                {
+                    "name": "2. Missing Cookie → 401",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/resume/list",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "resume",
+                                "list"
+                            ]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "pm.test('Returns 401 without cookie', function () {",
+                                    "    pm.response.to.have.status(401);",
+                                    "    var json = pm.response.json();",
+                                    "    pm.expect(json.detail).to.include('Not authenticated');",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "3. Invalid Token → 401",
+                    "request": {
+                        "method": "GET",
+                        "header": [
+                            {
+                                "key": "Cookie",
+                                "value": "better-auth.session_token=bogus-token-12345.fake_sig"
+                            }
+                        ],
+                        "url": {
+                            "raw": "{{base_url}}/api/resume/list",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "resume",
+                                "list"
+                            ]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "pm.test('Returns 401 with bad token', function () {",
+                                    "    pm.response.to.have.status(401);",
+                                    "    var json = pm.response.json();",
+                                    "    pm.expect(json.detail).to.eql('Invalid session');",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "4. Valid Session (Cookie) → 200",
+                    "request": {
+                        "method": "GET",
+                        "header": [
+                            {
+                                "key": "Cookie",
+                                "value": "better-auth.session_token={{session_cookie}}"
+                            }
+                        ],
+                        "url": {
+                            "raw": "{{base_url}}/api/resume/list",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "resume",
+                                "list"
+                            ]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "pm.test('Authenticated request succeeds', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "    pm.expect(pm.response.json()).to.be.an('array');",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "4b. Valid Session (Bearer) → 200",
+                    "request": {
+                        "method": "GET",
+                        "header": [
+                            {
+                                "key": "Authorization",
+                                "value": "Bearer {{bearer_token}}"
+                            }
+                        ],
+                        "url": {
+                            "raw": "{{base_url}}/api/resume/list",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "resume",
+                                "list"
+                            ]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "pm.test('Authenticated request (Bearer) succeeds', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "    pm.expect(pm.response.json()).to.be.an('array');",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "name": "Rate Limiting",
+            "item": [
+                {
+                    "name": "5. Rate Limit Check (run repeatedly)",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/health",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "health"
+                            ]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "// Run this in a loop (Collection Runner, 100 iterations)",
+                                    "// to verify rate limiting kicks in at 60 req/min",
+                                    "if (pm.response.code === 429) {",
+                                    "    pm.test('Rate limit enforced', function () {",
+                                    "        pm.response.to.have.status(429);",
+                                    "    });",
+                                    "} else {",
+                                    "    pm.test('Request within limit', function () {",
+                                    "        pm.response.to.have.status(200);",
+                                    "    });",
+                                    "}"
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

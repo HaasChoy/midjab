@@ -6,7 +6,6 @@ Main API entrypoint. Run with:
     cd brain_midjab && uvicorn api.app:app --reload --port 8000
 """
 
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -57,11 +56,6 @@ app.add_middleware(
 # ── Routes ─────────────────────────────────────────────────────────────
 app.include_router(resume_router, prefix="/api/resume", tags=["resume"])
 app.include_router(pipeline_router, prefix="/api/pipeline", tags=["pipeline"])
-
-# ── Dev routes (only in non-production) ────────────────────────────────
-if os.getenv("ENVIRONMENT") != "production":
-    from api.routes.dev import router as dev_router
-    app.include_router(dev_router, prefix="/api/dev", tags=["dev"])
 
 
 @app.get("/api/health")
